@@ -26,7 +26,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sled::Batch;
 
-use super::{ContactsStore, MessageStore, StateStore};
+use super::{ContactsStore, MessageStore, StateStore, UnreadMessagesStore};
 use crate::{manager::Registered, proto::ContentProto, store::Thread, Error, Store};
 
 const SLED_KEY_SCHEMA_VERSION: &str = "schema_version";
@@ -43,6 +43,7 @@ const SLED_TREE_SIGNED_PRE_KEYS: &str = "signed_pre_keys";
 const SLED_TREE_IDENTITIES: &str = "identities";
 const SLED_TREE_SESSIONS: &str = "sessions";
 const SLED_TREE_THREAD_PREFIX: &str = "threads";
+const SLED_TREE_UNREAD_THREAD_PREFIX: &str = "unread_threads";
 const SLED_TREE_SENDER_KEYS: &str = "sender_keys";
 
 #[derive(Clone)]
@@ -69,13 +70,15 @@ pub enum MigrationConflictStrategy {
 pub enum SchemaVersion {
     /// prior to any versioning of the schema
     V0 = 0,
-    /// the current version
+    /// the original version
     V1 = 1,
+    /// the current version -> adds support for unread messages
+    V2 = 2,
 }
 
 impl SchemaVersion {
     fn current() -> SchemaVersion {
-        Self::V1
+        Self::V2
     }
 
     /// return an iterator on all the necessary migration steps from another version
@@ -86,6 +89,7 @@ impl SchemaVersion {
         }
         .map(|i| match i {
             1 => SchemaVersion::V1,
+            2 => SchemaVersion::V2,
             _ => unreachable!("oops, this not supposed to happen!"),
         })
     }
@@ -212,6 +216,18 @@ impl SledStore {
         hasher.update(key.as_bytes());
         format!("{SLED_TREE_THREAD_PREFIX}:{:x}", hasher.finalize())
     }
+    fn unread_messages_thread_tree_name(&self, t: &Thread) -> String {
+        let key = match t {
+            Thread::Contact(uuid) => format!("{SLED_TREE_UNREAD_THREAD_PREFIX}:contact:{uuid}"),
+            Thread::Group(group_id) => format!(
+                "{SLED_TREE_UNREAD_THREAD_PREFIX}:group:{}",
+                base64::encode(group_id)
+            ),
+        };
+        let mut hasher = Sha256::new();
+        hasher.update(key.as_bytes());
+        format!("{SLED_TREE_UNREAD_THREAD_PREFIX}:{:x}", hasher.finalize())
+    }
 }
 
 fn migrate(
@@ -232,6 +248,9 @@ fn migrate(
             match step {
                 SchemaVersion::V1 => {
                     warn!("migrating from v0, nothing to do")
+                }
+                SchemaVersion::V2 => {
+                    warn!("migrating from v1, adding unread count to threads and messages")
                 }
                 _ => return Err(Error::MigrationConflict),
             }
@@ -660,13 +679,14 @@ impl SenderKeyStore for SledStore {
 impl MessageStore for SledStore {
     type MessagesIter = SledMessagesIter;
 
-    fn save_message(&mut self, thread: &Thread, message: Content) -> Result<(), Error> {
+    fn save_message(&mut self, thread: &Thread, message: Content) -> Result<u64, Error> {
         log::trace!(
             "Storing a message with thread: {:?}, timestamp: {}",
             thread,
             message.metadata.timestamp,
         );
-        let timestamp_bytes = message.metadata.timestamp.to_be_bytes();
+        let timestamp = message.metadata.timestamp;
+        let timestamp_bytes = timestamp.to_be_bytes();
         let proto: ContentProto = message.into();
 
         let tree = self.messages_thread_tree_name(thread);
@@ -679,7 +699,7 @@ impl MessageStore for SledStore {
         )?;
 
         let _ = self.tree(tree)?.insert(key, value)?;
-        Ok(())
+        Ok(timestamp)
     }
 
     fn delete_message(&mut self, thread: &Thread, timestamp: u64) -> Result<bool, Error> {
@@ -720,8 +740,99 @@ impl MessageStore for SledStore {
             iter: iter.rev(),
         })
     }
+
+    fn latest_message(
+        &self,
+        thread: &Thread,
+    ) -> Result<Option<libsignal_service::prelude::Content>, Error> {
+        let tree = self.db.open_tree(self.messages_thread_tree_name(thread))?;
+        let val = tree.first()?;
+        match val {
+            Some(v) => {
+                // let (_key, value) = v;
+                // let buffer:&[u8] = value.as_ref();
+                // let b2 = self.cipher.as_ref().map_or_else(
+                //     || serde_json::from_slice(buffer).map_err(Error::from),
+                //     |c| c.decrypt_value(buffer).map_err(Error::from),
+                // )?;
+                // println!("buffer: {:?}", buffer);
+                // let proto = match ContentProto::decode(b2.as_slice()){
+                //     Ok(p) => p,
+                //     Err(e) => {
+                //         log::error!("Error decoding message: {}", e);
+                //         return Ok(None);
+                //     }
+                // };
+                // let content = proto.try_into()?;
+                // Ok(Some(content))
+                Ok(None)
+            }
+            None => Ok(None),
+        }
+    }
 }
 
+impl UnreadMessagesStore for SledStore {
+    fn unread_messages(&self, thread: &Thread) -> Result<Vec<u64>, Error> {
+        let tree = self
+            .db
+            .open_tree(self.unread_messages_thread_tree_name(thread))?;
+        let unread = vec![];
+        for _item in tree.iter() {
+            //let (key, _) = item?;
+            // todo fix this
+            // let timescleartamp = u64::from_be_bytes(key.try_into().unwrap());
+            //unread.push(timestamp);
+        }
+        Ok(unread)
+    }
+
+    fn unread_messages_count(&self, thread: &Thread) -> Result<usize, Error> {
+        let tree = self
+            .db
+            .open_tree(self.unread_messages_thread_tree_name(thread))?;
+        Ok(tree.len())
+    }
+
+    fn mark_all_as_read(&mut self, thread: &Thread) -> Result<(), Error> {
+        let tree = self
+            .db
+            .open_tree(self.unread_messages_thread_tree_name(thread))?;
+        tree.clear()?;
+        Ok(())
+    }
+
+    fn mark_as_read(&mut self, thread: &Thread, timestamp: u64) -> Result<(), Error> {
+        let tree = self
+            .db
+            .open_tree(self.unread_messages_thread_tree_name(thread))?;
+        tree.remove(timestamp.to_be_bytes())?;
+        Ok(())
+    }
+
+    fn add_unread_message(&mut self, thread: &Thread, timestamp: u64) -> Result<(), Error> {
+        log::info!("add_unread_message: {:?} {}", thread, timestamp);
+        let tree = self
+            .db
+            .open_tree(self.unread_messages_thread_tree_name(thread))?;
+        tree.insert(timestamp.to_be_bytes(), &[])?;
+        Ok(())
+    }
+    fn unread_messages_per_thread(&self) -> Result<Vec<(Thread, Vec<u64>)>, Error> {
+        let unread_messages = vec![];
+
+        let tree = self.db.open_tree(SLED_TREE_UNREAD_THREAD_PREFIX)?;
+        for _item in tree.iter(){
+            // let (key, _) = item?;
+
+            // let thread = Thread::from_bytes(&key)?;
+            // let unread = self.unread_messages(&thread)?;
+            // unread_messages.push((thread, unread));
+        }
+        println!("unread_messages_per_thread not implemented {:?}", tree);
+        Ok(unread_messages)
+    }
+}
 pub struct SledMessagesIter {
     cipher: Option<Arc<StoreCipher>>,
     iter: std::iter::Rev<sled::Iter>,

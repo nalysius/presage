@@ -130,6 +130,8 @@ enum Cmd {
         )]
         group_master_key: Option<[u8; 32]>,
     },
+    #[clap(about = "Show a list of all conversations with unread messages")]
+    ListUnreadConversations,
     #[clap(about = "Find a contact in the embedded DB")]
     FindContact {
         #[clap(long, short = 'u', help = "contact UUID")]
@@ -210,7 +212,7 @@ async fn receive<C: Store + MessageStore>(
     manager: &mut Manager<C, Registered>,
 ) -> anyhow::Result<()> {
     let attachments_tmp_dir = Builder::new().prefix("presage-attachments").tempdir()?;
-    info!(
+    println!(
         "attachments will be stored in {}",
         attachments_tmp_dir.path().display()
     );
@@ -232,6 +234,7 @@ async fn receive<C: Store + MessageStore>(
                     }),
                 ..
             }) => {
+                println!("Received message from {:?}", metadata.sender);
                 if let Some(quote) = &message.quote {
                     println!(
                         "Quote from {:?}: > {:?} / {}",
@@ -282,7 +285,7 @@ async fn receive<C: Store + MessageStore>(
                 }
             }
             ContentBody::SynchronizeMessage(m) => {
-                eprintln!("Unhandled sync message: {:?}", m);
+                println!("Unhandled sync message: {:?}", m);
             }
             ContentBody::TypingMessage(_) => {
                 println!("{:?} is typing", metadata.sender);
@@ -362,6 +365,7 @@ async fn run<C: Store + MessageStore>(subcommand: Cmd, config_store: C) -> anyho
         }
         Cmd::Receive => {
             let mut manager = Manager::load_registered(config_store)?;
+            println!("Listening for messages...");
             receive(&mut manager).await?;
         }
         Cmd::Send { uuid, message } => {
