@@ -273,7 +273,7 @@ async fn receive<C: Store + MessageStore>(
                         let master_key = GroupMasterKey::new(master_key_bytes);
                         let group = manager.get_group_v2(master_key).await?;
                         let group_changes = manager.decrypt_group_context(group_v2)?;
-                        session_name = group.title;
+                        session_name = group.title.to_string();
                         println!("Group v2: {:?}", session_name);
                         println!("Group change: {:?}", group_changes);
                         println!("Group master key: {:?}", hex::encode(&master_key_bytes));
