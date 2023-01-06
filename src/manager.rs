@@ -1,9 +1,8 @@
-use std::time::UNIX_EPOCH;
-
 use futures::{channel::mpsc, channel::oneshot, future, AsyncReadExt, Stream, StreamExt};
 use log::{debug, error, info, trace};
 use rand::{distributions::Alphanumeric, prelude::ThreadRng, Rng, RngCore};
 use serde::{Deserialize, Serialize};
+use std::time::UNIX_EPOCH;
 use url::Url;
 use libsignal_service::proto::Group as ProtoGroup;
 
@@ -52,6 +51,13 @@ pub struct Manager<Store, State> {
     config_store: Store,
     /// Part of the manager which is persisted in the store.
     state: State,
+}
+pub struct Conversation {
+    pub thread: Thread,
+    pub last_message: Option<Content>,
+    pub unread_messages_count: usize,
+    pub contact: Option<Contact>,
+    pub groupv2: Option<Group>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -123,10 +129,11 @@ impl<C: Store> Manager<C, Registration> {
     ///
     ///     use presage::{
     ///         prelude::{phonenumber::PhoneNumber, SignalServers},
-    ///         Manager, RegistrationOptions, SledStore, MigrationConflictStrategy
+    ///         Manager, MigrationConflictStrategy, RegistrationOptions, SledStore,
     ///     };
     ///
-    ///     let config_store = SledStore::open("/tmp/presage-example", MigrationConflictStrategy::Drop)?;
+    ///     let config_store =
+    ///         SledStore::open("/tmp/presage-example", MigrationConflictStrategy::Drop)?;
     ///
     ///     let manager = Manager::register(
     ///         config_store,
@@ -205,12 +212,13 @@ impl<C: Store> Manager<C, Linking> {
     /// The URL to present to the user will be sent in the channel given as the argument.
     ///
     /// ```no_run
-    /// use presage::{prelude::SignalServers, Manager, SledStore, MigrationConflictStrategy};
     /// use futures::{channel::oneshot, future, StreamExt};
+    /// use presage::{prelude::SignalServers, Manager, MigrationConflictStrategy, SledStore};
     ///
     /// #[tokio::main]
     /// async fn main() -> anyhow::Result<()> {
-    ///     let config_store = SledStore::open("/tmp/presage-example", MigrationConflictStrategy::Drop)?;
+    ///     let config_store =
+    ///         SledStore::open("/tmp/presage-example", MigrationConflictStrategy::Drop)?;
     ///
     ///     let (mut tx, mut rx) = oneshot::channel();
     ///     let (manager, err) = future::join(
@@ -223,7 +231,7 @@ impl<C: Store> Manager<C, Linking> {
     ///         async move {
     ///             match rx.await {
     ///                 Ok(url) => println!("Show URL {} as QR code to user", url),
-    ///                 Err(e) => println!("Error linking device: {}", e)
+    ///                 Err(e) => println!("Error linking device: {}", e),
     ///             }
     ///         },
     ///     )
@@ -658,10 +666,27 @@ impl<C: Store> Manager<C, Registered> {
                             Ok(Some(content)) => {
                                 if let Ok(thread) = Thread::try_from(&content) {
                                     // TODO: handle reactions here, we should update the original message?
-                                    if let Err(e) =
-                                        state.config_store.save_message(&thread, content.clone())
+                                    match state.config_store.save_message(&thread, content.clone())
                                     {
-                                        log::error!("Error saving message to store: {}", e);
+                                        Ok(id) => {
+                                            log::info!("Saved message with id {} {:?}", id, state.config_store.my_uuid());
+                                            if content.metadata.sender.uuid == Some(state.config_store.my_uuid().ok()?) {
+                                                log::info!("Message sent by us, skipping unread");
+                                                state.config_store.mark_all_as_read(&thread);
+                                                return Some((content, state));
+                                            }
+                                            if let Err(e) =
+                                                state.config_store.add_unread_message(&thread, id)
+                                            {
+                                                log::error!(
+                                                    "Error adding unread message to store: {}",
+                                                    e
+                                                );
+                                            }
+                                        }
+                                        Err(e) => {
+                                            log::error!("Error saving message to store: {}", e);
+                                        }
                                     }
                                 }
 
@@ -769,6 +794,52 @@ impl<C: Store> Manager<C, Registered> {
         self.config_store.save_message(&thread, content)?;
 
         Ok(())
+    }
+
+    /// Get all sessions with unread messages.
+    pub async fn get_unread_sessions(&self) -> Result<Vec<(Thread, Vec<u64>)>, Error> {
+        return self.config_store.unread_messages_per_thread();
+    }
+
+    /// Get all sessions with unread messages as counter.
+    pub fn get_unread_sessions_count(&self) -> Result<Vec<(Thread, usize)>, Error> {
+        let unread_sessions = self.config_store.unread_messages_per_thread().unwrap();
+        let mut unread_sessions_count = Vec::new();
+        for item in unread_sessions.into_iter() {
+            let (thread, messages) = item;
+            unread_sessions_count.push((thread, messages.len()));
+        }
+        Ok(unread_sessions_count)
+    }
+
+    pub async fn load_unread_conversations(&self) -> Result<Vec<Conversation>, Error> {
+        let contacts = self.get_contacts()?;
+        let mut unread_conversations = Vec::new();
+        for contact in contacts {
+            match contact {
+                Ok(contact) => {
+                            let thread = Thread::Contact(contact.address.uuid.unwrap());
+                            let unread_messages_count =
+                                self.config_store.unread_messages_count(&thread)?;
+                                if unread_messages_count == 0 {
+                                    continue;
+                                }
+                            let latest_message = self.config_store.latest_message(&thread)?;
+                            let conversation = Conversation {
+                                thread: thread,
+                                last_message: latest_message,
+                                contact: Some(contact),
+                                unread_messages_count: unread_messages_count,
+                                groupv2: None,
+                            };
+                            unread_conversations.push(conversation);
+                    }
+                    Err(e) => {
+                        log::error!("Error getting contact: {}", e);
+                    }
+                }
+        }
+        Ok(unread_conversations)
     }
 
     /// Clears all sessions established wiht [recipient](ServiceAddress).

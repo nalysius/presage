@@ -30,6 +30,7 @@ pub trait Store:
     + ContactsStore
     + MessageStore
     + GroupsStore
+    + UnreadMessagesStore
     + SenderKeyStore
     + Sync
     + Clone
@@ -144,8 +145,9 @@ pub trait MessageStore {
     type MessagesIter: Iterator<Item = Result<Content, Error>>;
 
     /// Save a message in a [Thread] identified by a timestamp.
+    /// Returns the timestamp of the message as Vec<u8>.
     /// TODO: deriving the thread happens from the content, so we can also ditch the first parameter
-    fn save_message(&mut self, thread: &Thread, message: Content) -> Result<(), Error>;
+    fn save_message(&mut self, thread: &Thread, message: Content) -> Result<u64, Error>;
 
     /// Delete a single message, identified by its received timestamp from a thread.
     fn delete_message(&mut self, thread: &Thread, timestamp: u64) -> Result<bool, Error>;
@@ -153,6 +155,30 @@ pub trait MessageStore {
     /// Retrieve a message from a [Thread] by its timestamp.
     fn message(&self, thread: &Thread, timestamp: u64) -> Result<Option<Content>, Error>;
 
+    /// Retruieve latest message from a [Thread].
+    fn latest_message(&self, thread: &Thread) -> Result<Option<Content>, Error>;
+
     /// Retrieve a message from a [Thread].
     fn messages(&self, thread: &Thread, from: Option<u64>) -> Result<Self::MessagesIter, Error>;
+}
+
+pub trait UnreadMessagesStore {
+    /// Mark a message as read.
+    fn mark_as_read(&mut self, thread: &Thread, timestamp: u64) -> Result<(), Error>;
+
+    /// Mark all messages in a thread as read.
+    fn mark_all_as_read(&mut self, thread: &Thread) -> Result<(), Error>;
+
+    /// Get the unread messages in a thread.
+    fn unread_messages(&self, thread: &Thread) -> Result<Vec<u64>, Error>;
+
+    /// Get the unrad message count in a thread.
+    fn unread_messages_count(&self, thread: &Thread) -> Result<usize, Error>;
+
+    /// Get the unread messages for each thread
+    fn unread_messages_per_thread(&self) -> Result<Vec<(Thread, Vec<u64>)>, Error>;
+
+    /// Add a message to the unread messages.
+    /// This is used when a message is received and the sender is not me
+    fn add_unread_message(&mut self, thread: &Thread, timestamp: u64) -> Result<(), Error>;
 }
