@@ -8,7 +8,7 @@ use clap::{ArgGroup, Parser, Subcommand};
 use directories::ProjectDirs;
 use env_logger::Env;
 use futures::{channel::oneshot, future, pin_mut, StreamExt};
-use libsignal_service::push_service::WhoAmIResponse;
+use libsignal_service::profile_name::ProfileName;
 use libsignal_service::{groups_v2::Group, push_service::ProfileKey};
 use log::{debug, info};
 use notify_rust::Notification;
@@ -162,6 +162,8 @@ enum Cmd {
         )]
         master_key: [u8; 32],
     },
+    #[clap(about = "Update contacts from the signal server, where the contacts have no name")]
+    UpdateContactsFromProfile,
     #[cfg(feature = "quirks")]
     RequestSyncContacts,
 }
@@ -529,6 +531,40 @@ async fn run<C: Store + MessageStore>(subcommand: Cmd, config_store: C) -> anyho
                 println!("No groups found");
             }
         },
+        Cmd::UpdateContactsFromProfile => {
+            let mut manager = Manager::load_registered(config_store)?;
+            for contact in manager.get_contacts()? {
+                let mut contact = contact?;
+                if contact.name.is_empty() {
+                    let k = contact.profile_key.to_vec();
+                    let profile_key: [u8; 32] = match k.try_into() {
+                        Ok(key) => key,
+                        Err(_) => continue,
+                    };
+                    let profile = manager
+                        .retrieve_profile_by_uuid(
+                            contact.address.uuid.unwrap_or(Uuid::nil()),
+                            profile_key,
+                        )
+                        .await?;
+                    let name = profile.name.unwrap_or(ProfileName {
+                        given_name: match contact.address.phonenumber {
+                            Some(_) => "".to_string(),
+                            None => continue,
+                        },
+                        family_name: None,
+                    });
+                    contact.name = name.to_string();
+                    match manager.save_contact(contact) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            println!("Error saving contact: {:?}", e);
+                        }
+                    };
+                    println!("Updating contact: {:?}", name);
+                }
+            }
+        }
         Cmd::ListContacts => {
             let manager = Manager::load_registered(config_store)?;
             for contact in manager.get_contacts()? {
