@@ -2,13 +2,13 @@ use crate::{manager::Registered, Error};
 use libsignal_service::{
     content::ContentBody,
     models::Contact,
-    proto::Group,
     prelude::{
         protocol::{
             IdentityKeyStore, PreKeyStore, SenderKeyStore, SessionStoreExt, SignedPreKeyStore,
         },
         Content, Uuid,
     },
+    proto::Group,
     proto::{sync_message::Sent, DataMessage, GroupContextV2, SyncMessage},
 };
 
@@ -50,6 +50,7 @@ pub trait Store:
 pub trait StateStore<S> {
     fn load_state(&self) -> Result<Registered, Error>;
     fn save_state(&mut self, state: &S) -> Result<(), Error>;
+    fn my_uuid(&self) -> Result<Option<Uuid>, Error>;
 }
 
 pub trait ContactsStore {
@@ -177,6 +178,9 @@ pub trait UnreadMessagesStore {
 
     /// Get the unread messages for each thread
     fn unread_messages_per_thread(&self) -> Result<Vec<(Thread, Vec<u64>)>, Error>;
+
+    /// Get the unread messages for each thread
+    fn unread_messages_count_per_thread(&self) -> Result<Vec<(Thread, usize)>, Error>;
 
     /// Add a message to the unread messages.
     /// This is used when a message is received and the sender is not me

@@ -587,6 +587,18 @@ async fn run<C: Store + MessageStore>(subcommand: Cmd, config_store: C) -> anyho
                 }
             }
         }
+        Cmd::ListUnreadConversations => {
+            let manager = Manager::load_registered(config_store)?;
+            for conversation in manager.get_unread_sessions_count()? {
+                let (conversation, unread_messages) = conversation;
+                if unread_messages > 0 {
+                    match conversation{
+                        Thread::Contact(contact) => println!("{:?} unread: {:?}", contact, unread_messages),
+                        Thread::Group(group) => println!("{:?} unread: {:?}", base64::encode(group), unread_messages),
+                    }
+                }
+            }
+        }
         Cmd::Whoami => {
             let manager = Manager::load_registered(config_store)?;
             println!("{:?}", &manager.whoami().await?);

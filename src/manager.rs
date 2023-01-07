@@ -670,11 +670,16 @@ impl<C: Store> Manager<C, Registered> {
                                     {
                                         Ok(id) => {
                                             log::info!("Saved message with id {} {:?}", id, state.config_store.my_uuid());
-                                            if content.metadata.sender.uuid == Some(state.config_store.my_uuid().ok()?) {
-                                                log::info!("Message sent by us, skipping unread");
-                                                state.config_store.mark_all_as_read(&thread);
-                                                return Some((content, state));
-                                            }
+                                            // if content.metadata.sender.uuid == state.config_store.my_uuid().ok().unwrap_or_default() {
+                                            //     log::info!("Message sent by us, skipping unread");
+                                            //     match state.config_store.mark_all_as_read(&thread){
+                                            //         Ok(()) => {},
+                                            //         Err(e) => {
+                                            //             log::error!("Error marking all as read: {}", e);
+                                            //         }
+                                            //     }
+                                            //     return Some((content, state));
+                                            // }
                                             if let Err(e) =
                                                 state.config_store.add_unread_message(&thread, id)
                                             {
@@ -803,11 +808,10 @@ impl<C: Store> Manager<C, Registered> {
 
     /// Get all sessions with unread messages as counter.
     pub fn get_unread_sessions_count(&self) -> Result<Vec<(Thread, usize)>, Error> {
-        let unread_sessions = self.config_store.unread_messages_per_thread().unwrap();
+        let unread_sessions = self.config_store.unread_messages_count_per_thread().unwrap();
         let mut unread_sessions_count = Vec::new();
-        for item in unread_sessions.into_iter() {
-            let (thread, messages) = item;
-            unread_sessions_count.push((thread, messages.len()));
+        for (thread,  messages_count) in unread_sessions {
+            unread_sessions_count.push((thread, messages_count));
         }
         Ok(unread_sessions_count)
     }

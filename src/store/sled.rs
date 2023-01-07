@@ -17,8 +17,8 @@ use libsignal_service::{
         },
         Content, Uuid,
     },
-    push_service::DEFAULT_DEVICE_ID, 
     proto::Group,
+    push_service::DEFAULT_DEVICE_ID,
 };
 use log::{debug, trace, warn};
 use matrix_sdk_store_encryption::StoreCipher;
@@ -27,9 +27,14 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sled::Batch;
 
-use super::{ContactsStore, GroupsStore, MessageStore, StateStore};
-use crate::{manager::Registered, proto::{ContentProto, GroupProto}, store::Thread, Error, Store};
 use super::UnreadMessagesStore;
+use super::{ContactsStore, GroupsStore, MessageStore, StateStore};
+use crate::{
+    manager::Registered,
+    proto::{ContentProto, GroupProto},
+    store::Thread,
+    Error, Store,
+};
 
 const SLED_KEY_SCHEMA_VERSION: &str = "schema_version";
 
@@ -312,6 +317,10 @@ impl StateStore<Registered> for SledStore {
             .insert(SLED_KEY_REGISTRATION, serde_json::to_vec(state)?)?;
         Ok(())
     }
+    fn my_uuid(&self) -> Result<Option<Uuid>, Error> {
+        let state = self.load_state()?;
+        Ok(Some(state.uuid))
+    }
 }
 
 impl Store for SledStore {
@@ -402,9 +411,9 @@ impl GroupsStore for SledStore {
 
     fn save_groups(&mut self, groups: impl Iterator<Item = Group>) -> Result<(), Error> {
         for group in groups {
-            let key = group.public_key.to_vec(); 
+            let key = group.public_key.to_vec();
             let proto: GroupProto = group.into();
-            let value  = proto.encode_to_vec();
+            let value = proto.encode_to_vec();
             self.insert(SLED_KEY_GROUPS, key, value)?;
         }
         debug!("saved groups");
@@ -419,22 +428,22 @@ impl GroupsStore for SledStore {
     }
 
     fn group_by_id(&self, id: Uuid) -> Result<Option<Group>, Error> {
-       let val: Option<Vec<u8>>  =  self.get(SLED_KEY_GROUPS, id)?;
-       match val{
-              Some(ref v) => {
+        let val: Option<Vec<u8>> = self.get(SLED_KEY_GROUPS, id)?;
+        match val {
+            Some(ref v) => {
                 let proto = GroupProto::decode(v.as_slice())?;
                 let group = proto.try_into()?;
                 Ok(Some(group))
-              },
-              None => Ok(None)
-       }
+            }
+            None => Ok(None),
+        }
     }
     fn save_group(&self, group: Group) -> Result<(), Error> {
-        let key = group.public_key.to_vec(); 
+        let key = group.public_key.to_vec();
         let proto: GroupProto = group.into();
-        let value  = proto.encode_to_vec();
+        let value = proto.encode_to_vec();
         self.insert(SLED_KEY_GROUPS, key, value)?;
-        Ok(())  
+        Ok(())
     }
 }
 pub struct SledContactsIter {
@@ -479,7 +488,6 @@ impl Iterator for SledGroupsIter {
             })
             .and_then(|data: Vec<u8>| GroupProto::decode(&data[..]).map_err(Error::from))
             .map_or_else(|e| Some(Err(e)), |p| Some(p.try_into()))
- 
     }
 }
 
@@ -900,17 +908,38 @@ impl UnreadMessagesStore for SledStore {
         Ok(())
     }
     fn unread_messages_per_thread(&self) -> Result<Vec<(Thread, Vec<u64>)>, Error> {
-        let unread_messages = vec![];
-
-        let tree = self.db.open_tree(SLED_TREE_UNREAD_THREAD_PREFIX)?;
-        for _item in tree.iter(){
-            // let (key, _) = item?;
-
-            // let thread = Thread::from_bytes(&key)?;
-            // let unread = self.unread_messages(&thread)?;
-            // unread_messages.push((thread, unread));
+        let mut unread_messages = vec![];
+        self.contacts()?.for_each(|contact| {
+            let uuid = match contact{
+                Ok(c) => c.address.uuid,
+                Err(_) => Some(Uuid::nil())
+            }.unwrap_or_default();
+            let thread = Thread::Contact(uuid);
+            let unread = self.unread_messages(&thread).unwrap_or_default();
+            unread_messages.push((thread, unread));
+        });
+        Ok(unread_messages)
+    }
+    fn unread_messages_count_per_thread(&self) -> Result<Vec<(Thread, usize)>, Error> {
+        let mut unread_messages = vec![];
+        self.contacts()?.for_each(|contact| {
+            let uuid = match contact{
+                Ok(c) => c.address.uuid,
+                Err(_) => Some(Uuid::nil())
+            }.unwrap_or_default();
+            let thread = Thread::Contact(uuid);
+            let unread = self.unread_messages_count(&thread).unwrap_or_default();
+            unread_messages.push((thread, unread));
+        });
+        for group in self.groups()?{
+            let group_id: [u8; 32] = match group?.public_key.try_into(){
+                Ok(g) => g,
+                Err(e) => {println!("{:?}", e); [0; 32]}
+            };
+            let thread = Thread::Group(group_id);
+            let unread = self.unread_messages_count(&thread).unwrap_or_default();
+            unread_messages.push((thread, unread));
         }
-        println!("unread_messages_per_thread not implemented {:?}", tree);
         Ok(unread_messages)
     }
 }
