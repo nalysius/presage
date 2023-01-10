@@ -395,9 +395,8 @@ impl ContactsStore for SledStore {
 
     fn contact_by_id(&self, id: Uuid) -> Result<Option<Contact>, Error> {
         self.get(SLED_KEY_CONTACTS, id)?
-            .map(|b: Vec<u8>| serde_json::from_slice(&b))
-            .transpose()
-            .map_err(Error::from)
+            .map(|contact: Contact| Some(contact))
+            .ok_or(Error::ContactNotFound)
     }
 }
 
@@ -427,7 +426,7 @@ impl GroupsStore for SledStore {
         })
     }
 
-    fn group_by_id(&self, id: Uuid) -> Result<Option<Group>, Error> {
+    fn group_by_id(&self, id:Vec<u8>) -> Result<Option<Group>, Error> {
         let val: Option<Vec<u8>> = self.get(SLED_KEY_GROUPS, id)?;
         match val {
             Some(ref v) => {
@@ -838,23 +837,22 @@ impl MessageStore for SledStore {
         let val = tree.first()?;
         match val {
             Some(v) => {
-                // let (_key, value) = v;
-                // let buffer:&[u8] = value.as_ref();
-                // let b2 = self.cipher.as_ref().map_or_else(
-                //     || serde_json::from_slice(buffer).map_err(Error::from),
-                //     |c| c.decrypt_value(buffer).map_err(Error::from),
-                // )?;
-                // println!("buffer: {:?}", buffer);
-                // let proto = match ContentProto::decode(b2.as_slice()){
-                //     Ok(p) => p,
-                //     Err(e) => {
-                //         log::error!("Error decoding message: {}", e);
-                //         return Ok(None);
-                //     }
-                // };
-                // let content = proto.try_into()?;
-                // Ok(Some(content))
-                Ok(None)
+                let (_key, value) = v;
+                let buffer:&[u8] = value.as_ref();
+                let b2:Vec<u8> = self.cipher.as_ref().map_or_else(
+                    || serde_json::from_slice(buffer).map_err(Error::from),
+                    |c| c.decrypt_value(buffer).map_err(Error::from),
+                )?;
+                let proto = match ContentProto::decode(b2.as_slice()){
+                    Ok(p) => p,
+                    Err(e) => {
+                        log::error!("Error decoding message: {}", e);
+                        return Ok(None);
+                    }
+                };
+
+                let content = proto.try_into()?;
+                Ok(Some(content))
             }
             None => Ok(None),
         }

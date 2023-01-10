@@ -52,12 +52,13 @@ pub struct Manager<Store, State> {
     /// Part of the manager which is persisted in the store.
     state: State,
 }
-pub struct Conversation {
+pub struct Session {
     pub thread: Thread,
     pub last_message: Option<Content>,
     pub unread_messages_count: usize,
     pub contact: Option<Contact>,
-    pub groupv2: Option<Group>,
+    pub groupv2: Option<ProtoGroup>,
+    pub title: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -816,9 +817,33 @@ impl<C: Store> Manager<C, Registered> {
         Ok(unread_sessions_count)
     }
 
-    pub async fn load_unread_conversations(&self) -> Result<Vec<Conversation>, Error> {
+    pub async fn get_title_for_thread(&self, thread: &Thread) -> Result<String, Error> {
+        match thread {
+            Thread::Contact(uuid) => {
+                let contact = match self.get_contact_by_id(*uuid){
+                    Ok(contact) => contact,
+                    Err(e) => {
+                        log::error!("Error getting contact by id: {}, {:?}", e, uuid);
+                        None
+                    }
+                };
+                Ok(match contact{
+                    Some(contact) => contact.name,
+                    None => uuid.to_string()
+                })
+            }
+            Thread::Group(id) => {
+                match self.config_store.group_by_id(id.to_vec())?{
+                    Some(group) => Ok(String::from_utf8(group.title).unwrap_or("".to_string())),
+                    None => Ok("".to_string())
+                }
+            }
+        }
+    }
+
+    pub async fn load_conversations(&self) -> Result<Vec<Session>, Error> {
         let contacts = self.get_contacts()?;
-        let mut unread_conversations = Vec::new();
+        let mut conversations = Vec::new();
         for contact in contacts {
             match contact {
                 Ok(contact) => {
@@ -828,25 +853,94 @@ impl<C: Store> Manager<C, Registered> {
                                 if unread_messages_count == 0 {
                                     continue;
                                 }
-                            let latest_message = self.config_store.latest_message(&thread)?;
-                            let conversation = Conversation {
+                            let latest_message = match self.config_store.latest_message(&thread){
+                                Ok(message) => message,
+                                Err(e) => {
+                                    log::error!("Error getting latest message: {}", e);
+                                    None
+                                }
+                            };
+                            let title : Option<String>= match self.get_title_for_thread(&thread).await{
+                                Ok(title) => Some(title),
+                                Err(e) => {
+                                    log::error!("Error getting title: {}", e);
+                                    None
+                                }
+                            };
+                            let conversation = Session {
                                 thread: thread,
                                 last_message: latest_message,
                                 contact: Some(contact),
                                 unread_messages_count: unread_messages_count,
                                 groupv2: None,
+                                title,
                             };
-                            unread_conversations.push(conversation);
+                            conversations.push(conversation);
                     }
                     Err(e) => {
                         log::error!("Error getting contact: {}", e);
                     }
                 }
         }
-        Ok(unread_conversations)
+        for group in self.get_groups()? {
+            match group {
+                Ok(group) => {
+                    let key = group.public_key.to_vec();
+                    let group_id: [u8; 32] = match key.try_into(){
+                        Ok(g) => g,
+                        Err(e) => {println!("{:?}", e); [0; 32]}
+                    };
+                    let thread = Thread::Group(group_id);
+                    let unread_messages_count = self.config_store.unread_messages_count(&thread)?;
+                    if unread_messages_count == 0 {
+                        continue;
+                    }
+                    let latest_message = match self.config_store.latest_message(&thread){
+                        Ok(message) => message,
+                        Err(e) => {
+                            log::error!("Error getting latest message: {}", e);
+                            None
+                        }
+                    };
+                    let title : Option<String>= match self.get_title_for_thread(&thread).await{
+                        Ok(title) => Some(title),
+                        Err(e) => {
+                            log::error!("Error getting title: {}", e);
+                            None
+                        }
+                    };
+                    let conversation = Session {
+                        thread: thread,
+                        last_message: latest_message,
+                        contact: None,
+                        unread_messages_count: unread_messages_count,
+                        groupv2: Some(group),
+                        title,
+                    };
+                    conversations.push(conversation);
+                }
+                Err(e) => {
+                    log::error!("Error getting group: {}", e);
+                }
+            }
+        }
+        conversations.sort_unstable_by(|a, b| {
+            let a_timestamp = a.last_message.as_ref().map(|m| m.metadata.timestamp).unwrap_or(0);
+            let b_timestamp = b.last_message.as_ref().map(|m| m.metadata.timestamp).unwrap_or(0);
+            b_timestamp.cmp(&a_timestamp)
+        });
+            
+        
+        Ok(conversations)
     }
 
-    /// Clears all sessions established wiht [recipient](ServiceAddress).
+    /// Get all sessions
+    // pub async fn get_sessions(&self) -> Result<Vec<Session>, Error> {
+
+    //     Err(Error::NotImplemented)
+    // }
+
+    /// Clears all sessions established with [recipient](ServiceAddress).
     pub async fn clear_sessions(&self, recipient: &ServiceAddress) -> Result<(), Error> {
         self.config_store
             .delete_all_sessions(&recipient.identifier())

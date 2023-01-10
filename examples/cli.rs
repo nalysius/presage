@@ -138,6 +138,8 @@ enum Cmd {
     },
     #[clap(about = "Show a list of all conversations with unread messages")]
     ListUnreadConversations,
+    #[clap(about = "Show a list of all conversations")]
+    ListConversations,
     #[clap(about = "Find a contact in the embedded DB")]
     FindContact {
         #[clap(long, short = 'u', help = "contact UUID")]
@@ -597,6 +599,34 @@ async fn run<C: Store + MessageStore>(subcommand: Cmd, config_store: C) -> anyho
                         Thread::Group(group) => println!("{:?} unread: {:?}", base64::encode(group), unread_messages),
                     }
                 }
+            }
+        }
+        Cmd:: ListConversations =>{
+            let manager = Manager::load_registered(config_store)?;
+            let conversations = match manager.load_conversations().await{
+                Ok(conversations) => conversations,
+                Err(e) => bail!("Error loading conversations: {:?}", e),
+            };
+
+            for conversation in conversations {
+                let id = match conversation.thread{
+                    Thread::Contact(contact) => contact.to_string(),
+                    Thread::Group(group) => base64::encode(group).to_string(),
+                };
+                // println!("{:?}", conversation.last_message.unwrap().body);
+                let message_content: String = match conversation.last_message.as_ref(){
+                    Some(message) => match message.body.clone(){
+                        ContentBody::DataMessage(msg ) => msg.body.unwrap_or("".to_string()),
+                        _ => "".to_string(),
+                        
+                    },
+                    None => "".to_string(),
+                };
+                let timestamp: String = match conversation.last_message.as_ref(){
+                    Some(message )=> message.metadata.timestamp.to_string(),
+                    None => "".to_string(),
+                };
+                println!("{:?}-{:?} unread: {:?},  {:?}: {:?}", id,conversation.title.unwrap_or("".to_string()), conversation.unread_messages_count, timestamp,  message_content);
             }
         }
         Cmd::Whoami => {
