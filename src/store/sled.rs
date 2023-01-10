@@ -394,7 +394,7 @@ impl GroupsStore for SledStore {
         })
     }
 
-    fn group_by_id(&self, id: Vec<u8>) -> Result<Option<Group>, Error>{
+    fn group_by_id(&self, id: Vec<u8>) -> Result<Option<Group>, Error> {
         let val: Option<Vec<u8>> = self.get(SLED_KEY_GROUPS, id)?;
         match val {
             Some(ref v) => {
