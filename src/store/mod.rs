@@ -67,7 +67,7 @@ pub trait GroupsStore {
     fn save_groups(&mut self, groups: impl Iterator<Item = Group>) -> Result<(), Error>;
     fn save_group(&self, group: Group) -> Result<(), Error>;
     fn groups(&self) -> Result<Self::GroupsIter, Error>;
-    fn group_by_id(&self, id: Uuid) -> Result<Option<Group>, Error>;
+    fn group_by_id(&self, id: Vec<u8>) -> Result<Option<Group>, Error>;
 }
 /// A thread specifies where a message was sent, either to or from a contact or in a group.
 #[derive(Debug, Hash, Eq, PartialEq, Clone)]
