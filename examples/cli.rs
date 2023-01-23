@@ -669,8 +669,8 @@ async fn run<C: Store + MessageStore>(subcommand: Cmd, config_store: C) -> anyho
             let group = manager.get_group_v2(master_key).await?;
             log::info!("{:#?}", DebugGroup(&group));
             for member in &group.members {
-                let profile_key = base64::encode(&member.profile_key.bytes);
-                log::info!("{member:#?} => profile_key = {profile_key}");
+                let profile_key = base64::encode(member.profile_key.bytes);
+                println!("{member:#?} => profile_key = {profile_key}",);
             }
             manager.save_group(group, key.as_bytes().to_vec())?;
         }

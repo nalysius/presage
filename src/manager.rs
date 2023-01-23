@@ -1,9 +1,15 @@
-use futures::{channel::mpsc, channel::oneshot, future, AsyncReadExt, Stream, StreamExt};
+use std::{
+    fmt,
+    sync::Arc,
+    time::{Duration, UNIX_EPOCH},
+};
 use libsignal_service::proto::Group as ProtoGroup;
-use log::{debug, info, trace};
+
+use futures::{channel::mpsc, channel::oneshot, future, pin_mut, AsyncReadExt, Stream, StreamExt};
+use log::{debug, error, info, trace};
+use parking_lot::Mutex;
 use rand::{distributions::Alphanumeric, prelude::ThreadRng, Rng, RngCore};
 use serde::{Deserialize, Serialize};
-use std::time::UNIX_EPOCH;
 use url::Url;
 
 use libsignal_service::{
@@ -19,10 +25,7 @@ use libsignal_service::{
         protocol::{KeyPair, PrivateKey, PublicKey},
         Content, Envelope, GroupMasterKey, GroupSecretParams, PushService, Uuid,
     },
-    proto::{
-        sync_message::{self},
-        AttachmentPointer, GroupContextV2,
-    },
+    proto::{sync_message, AttachmentPointer, GroupContextV2},
     provisioning::{
         generate_registration_id, LinkingManager, ProvisioningManager, SecondaryDeviceProvisioning,
         VerificationCodeResponse,
@@ -34,6 +37,7 @@ use libsignal_service::{
     receiver::MessageReceiver,
     sender::{AttachmentSpec, AttachmentUploadError},
     utils::{serde_private_key, serde_public_key, serde_signaling_key},
+    websocket::SignalWebSocket,
     AccountManager, Profile, ServiceAddress,
 };
 use libsignal_service_hyper::push_service::HyperPushService;
@@ -62,6 +66,14 @@ pub struct Session {
     pub title: Option<String>,
 }
 
+impl<Store, State: fmt::Debug> fmt::Debug for Manager<Store, State> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Manager")
+            .field("state", &self.state)
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RegistrationOptions<'a> {
     pub signal_servers: SignalServers,
@@ -83,7 +95,10 @@ pub struct Confirmation {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Registered {
     #[serde(skip)]
-    cache: CacheCell<HyperPushService>,
+    push_service_cache: CacheCell<HyperPushService>,
+    #[serde(skip)]
+    websocket: Arc<Mutex<Option<SignalWebSocket>>>,
+
     pub signal_servers: SignalServers,
     pub device_name: Option<String>,
     pub phone_number: PhoneNumber,
@@ -98,6 +113,14 @@ pub struct Registered {
     #[serde(with = "serde_public_key")]
     pub(crate) public_key: PublicKey,
     profile_key: ProfileKey,
+}
+
+impl fmt::Debug for Registered {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Registered")
+            .field("websocket", &self.websocket.lock().is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Registered {
@@ -315,7 +338,8 @@ impl<C: Store> Manager<C, Linking> {
         let mut manager = Manager {
             config_store,
             state: Registered {
-                cache: CacheCell::default(),
+                push_service_cache: CacheCell::default(),
+                websocket: Default::default(),
                 signal_servers,
                 device_name: Some(device_name),
                 phone_number,
@@ -429,7 +453,8 @@ impl<C: Store> Manager<C, Confirmation> {
         let mut manager = Manager {
             config_store: self.config_store,
             state: Registered {
-                cache: CacheCell::default(),
+                push_service_cache: CacheCell::default(),
+                websocket: Default::default(),
                 signal_servers: self.state.signal_servers,
                 device_name: None,
                 phone_number,
@@ -528,6 +553,28 @@ impl<C: Store> Manager<C, Registered> {
         Ok(())
     }
 
+    async fn wait_for_contacts_sync(
+        &mut self,
+        mut messages: impl Stream<Item = Content> + Unpin,
+    ) -> Result<(), Error> {
+        let mut message_receiver = MessageReceiver::new(self.push_service()?);
+        while let Some(Content { body, .. }) = messages.next().await {
+            if let ContentBody::SynchronizeMessage(SyncMessage {
+                contacts: Some(contacts),
+                ..
+            }) = body
+            {
+                let contacts = message_receiver.retrieve_contacts(&contacts).await?;
+                let _ = self.config_store.clear_contacts();
+                self.config_store
+                    .save_contacts(contacts.filter_map(Result::ok))?;
+                info!("saved contacts");
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
     /// Request that the primary device to encrypt & send all of its contacts as a message to ourselves
     /// which can be then received, decrypted and stored in the message receiving loop.
     ///
@@ -547,10 +594,22 @@ impl<C: Store> Manager<C, Registered> {
             .expect("Time went backwards")
             .as_millis() as u64;
 
+        let messages = self.receive_messages().await?;
+        pin_mut!(messages);
+
+        // first request the sync
         self.send_message(self.state.uuid, sync_message, timestamp)
             .await?;
 
-        trace!("requested contacts sync");
+        // wait for it to arrive
+        info!("waiting for contacts sync for up to 3 minutes");
+        tokio::time::timeout(
+            Duration::from_secs(3 * 60),
+            self.wait_for_contacts_sync(messages),
+        )
+        .await
+        .map_err(Error::from)??;
+
         Ok(())
     }
 
@@ -607,32 +666,39 @@ impl<C: Store> Manager<C, Registered> {
     }
 
     async fn receive_messages_encrypted(
-        &self,
+        &mut self,
     ) -> Result<impl Stream<Item = Result<Envelope, ServiceError>>, Error> {
         let credentials = self.credentials()?.ok_or(Error::NotYetRegisteredError)?;
         let pipe = MessageReceiver::new(self.push_service()?)
             .create_message_pipe(credentials)
             .await?;
+        self.state.websocket.lock().replace(pipe.ws());
         Ok(pipe.stream())
     }
 
     /// Starts receiving and storing messages.
     ///
     /// Returns a [Stream] of messages to consume. Messages will also be stored by the implementation of the [MessageStore].
-    pub async fn receive_messages(&self) -> Result<impl Stream<Item = Content>, Error> {
-        log::info!("receive_messages");
+    pub async fn receive_messages(&mut self) -> Result<impl Stream<Item = Content>, Error> {
+        self.receive_messages_stream(false).await
+    }
+
+    async fn receive_messages_stream(
+        &mut self,
+        include_internal_events: bool,
+    ) -> Result<impl Stream<Item = Content>, Error> {
         struct StreamState<S, C> {
             encrypted_messages: S,
             service_cipher: ServiceCipher<C>,
-            push_service: HyperPushService,
             config_store: C,
+            include_internal_events: bool,
         }
 
         let init = StreamState {
             encrypted_messages: Box::pin(self.receive_messages_encrypted().await?),
             service_cipher: self.new_service_cipher()?,
-            push_service: self.push_service()?,
             config_store: self.config_store.clone(),
+            include_internal_events,
         };
 
         Ok(futures::stream::unfold(init, |mut state| async move {
@@ -667,6 +733,19 @@ impl<C: Store> Manager<C, Registered> {
                                 }
                             }
                             Ok(Some(content)) => {
+                                // contacts synchronization sent from the primary device (happens after linking, or on demand)
+                                if let ContentBody::SynchronizeMessage(SyncMessage {
+                                    contacts: Some(_),
+                                    ..
+                                }) = &content.body
+                                {
+                                    if state.include_internal_events {
+                                        return Some((content, state));
+                                    } else {
+                                        return None;
+                                    }
+                                }
+
                                 if let Ok(thread) = Thread::try_from(&content) {
                                     match content.clone().body {
                                         ContentBody::DataMessage(_) => {
@@ -1103,7 +1182,7 @@ impl<C: Store> Manager<C, Registered> {
     ///
     /// If no service is yet cached, it will create and cache one.
     fn push_service(&self) -> Result<HyperPushService, Error> {
-        self.state.cache.get(|| {
+        self.state.push_service_cache.get(|| {
             let credentials = self.credentials()?;
             let service_configuration: ServiceConfiguration = self.state.signal_servers.into();
 
@@ -1124,6 +1203,11 @@ impl<C: Store> Manager<C, Registered> {
         };
 
         Ok(MessageSender::new(
+            self.state
+                .websocket
+                .lock()
+                .clone()
+                .ok_or(Error::MessagePipeNotStarted)?,
             self.push_service()?,
             self.new_service_cipher()?,
             rand::thread_rng(),
