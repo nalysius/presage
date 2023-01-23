@@ -491,7 +491,7 @@ async fn run<C: Store + MessageStore>(subcommand: Cmd, config_store: C) -> anyho
                     profile_key = Some(ProfileKey(profilek));
                 }
             } else {
-                log::info!(
+                println!(
                     "Retrieving profile for: {:?} with
                 profile_key",
                     uuid
