@@ -1,6 +1,6 @@
 mod cache;
 mod errors;
-mod manager;
+pub mod manager;
 mod proto;
 mod store;
 
@@ -8,7 +8,7 @@ mod store;
 pub use store::sled::{MigrationConflictStrategy, SledStore};
 
 pub use errors::Error;
-pub use manager::{Confirmation, Linking, Manager, Registered, Registration, RegistrationOptions};
+pub use manager::{Confirmation, Linking, Manager, Registered, Registration, RegistrationOptions, Session};
 pub use proto::ContentProto;
 pub use store::{ContactsStore, GroupsStore, MessageStore, StateStore, Store, Thread};
 

@@ -768,6 +768,7 @@ impl MessageStore for SledStore {
     type MessagesIter = SledMessagesIter;
 
     fn save_message(&mut self, thread: &Thread, message: Content) -> Result<u64, Error> {
+        log::info!("Storing a message with thread: {:?}, timestamp: {}", thread, message.metadata.timestamp);
         log::trace!(
             "Storing a message with thread: {:?}, timestamp: {}",
             thread,
@@ -834,7 +835,7 @@ impl MessageStore for SledStore {
         thread: &Thread,
     ) -> Result<Option<libsignal_service::prelude::Content>, Error> {
         let tree = self.db.open_tree(self.messages_thread_tree_name(thread))?;
-        let val = tree.first()?;
+        let val = tree.last()?;
         match val {
             Some(v) => {
                 let (_key, value) = v;
@@ -932,7 +933,7 @@ impl UnreadMessagesStore for SledStore {
         for group in self.groups()?{
             let group_id: [u8; 32] = match group?.public_key.try_into(){
                 Ok(g) => g,
-                Err(e) => {println!("{:?}", e); [0; 32]}
+                Err(e) => {log::info!("{:?}", e); [0; 32]}
             };
             let thread = Thread::Group(group_id);
             let unread = self.unread_messages_count(&thread).unwrap_or_default();

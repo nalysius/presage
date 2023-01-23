@@ -1,10 +1,10 @@
 use futures::{channel::mpsc, channel::oneshot, future, AsyncReadExt, Stream, StreamExt};
-use log::{debug, error, info, trace};
+use libsignal_service::proto::Group as ProtoGroup;
+use log::{debug, info, trace};
 use rand::{distributions::Alphanumeric, prelude::ThreadRng, Rng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::time::UNIX_EPOCH;
 use url::Url;
-use libsignal_service::proto::Group as ProtoGroup;
 
 use libsignal_service::{
     attachment_cipher::decrypt_in_place,
@@ -52,6 +52,7 @@ pub struct Manager<Store, State> {
     /// Part of the manager which is persisted in the store.
     state: State,
 }
+#[derive(Debug)]
 pub struct Session {
     pub thread: Thread,
     pub last_message: Option<Content>,
@@ -231,8 +232,8 @@ impl<C: Store> Manager<C, Linking> {
     ///         ),
     ///         async move {
     ///             match rx.await {
-    ///                 Ok(url) => println!("Show URL {} as QR code to user", url),
-    ///                 Err(e) => println!("Error linking device: {}", e),
+    ///                 Ok(url) => log::info!("Show URL {} as QR code to user", url),
+    ///                 Err(e) => log::info!("Error linking device: {}", e),
     ///             }
     ///         },
     ///     )
@@ -619,6 +620,7 @@ impl<C: Store> Manager<C, Registered> {
     ///
     /// Returns a [Stream] of messages to consume. Messages will also be stored by the implementation of the [MessageStore].
     pub async fn receive_messages(&self) -> Result<impl Stream<Item = Content>, Error> {
+        log::info!("receive_messages");
         struct StreamState<S, C> {
             encrypted_messages: S,
             service_cipher: ServiceCipher<C>,
@@ -657,41 +659,64 @@ impl<C: Store> Manager<C, Registered> {
                                             .config_store
                                             .save_contacts(contacts_iter.filter_map(Result::ok))
                                         {
-                                            error!("failed to save contacts: {}", e)
+                                            log::info!("failed to save contacts: {}", e)
                                         }
                                         info!("saved contacts");
                                     }
-                                    Err(e) => error!("failed to retrieve contacts: {}", e),
+                                    Err(e) => log::info!("failed to retrieve contacts: {}", e),
                                 }
                             }
                             Ok(Some(content)) => {
                                 if let Ok(thread) = Thread::try_from(&content) {
-                                    // TODO: handle reactions here, we should update the original message?
-                                    match state.config_store.save_message(&thread, content.clone())
-                                    {
-                                        Ok(id) => {
-                                            log::info!("Saved message with id {} {:?}", id, state.config_store.my_uuid());
-                                            // if content.metadata.sender.uuid == state.config_store.my_uuid().ok().unwrap_or_default() {
-                                            //     log::info!("Message sent by us, skipping unread");
-                                            //     match state.config_store.mark_all_as_read(&thread){
-                                            //         Ok(()) => {},
-                                            //         Err(e) => {
-                                            //             log::error!("Error marking all as read: {}", e);
-                                            //         }
-                                            //     }
-                                            //     return Some((content, state));
-                                            // }
-                                            if let Err(e) =
-                                                state.config_store.add_unread_message(&thread, id)
+                                    match content.clone().body {
+                                        ContentBody::DataMessage(_) => {
+                                            match state
+                                                .config_store
+                                                .save_message(&thread, content.clone())
                                             {
-                                                log::error!(
-                                                    "Error adding unread message to store: {}",
-                                                    e
-                                                );
+                                                Ok(id) => {
+                                                    log::info!("Saved message with id {}", id);
+                                                    // add to unread messages
+                                                    if let Err(e) = state
+                                                        .config_store
+                                                        .add_unread_message(&thread, id)
+                                                    {
+                                                        log::info!(
+                                                        "Error adding unread message to store: {}",
+                                                        e
+                                                    );
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    log::info!(
+                                                        "Error saving message to store: {}",
+                                                        e
+                                                    );
+                                                }
                                             }
                                         }
-                                        Err(e) => {
-                                            log::error!("Error saving message to store: {}", e);
+                                        ContentBody::SynchronizeMessage(_) => {
+                                            match state
+                                                .config_store
+                                                .save_message(&thread, content.clone())
+                                            {
+                                                Ok(id) => {
+                                                    log::info!(
+                                                        "Saved message with id {} {:?}",
+                                                        id,
+                                                        state.config_store.my_uuid()
+                                                    );
+                                                }
+                                                Err(e) => {
+                                                    log::info!(
+                                                        "Error saving message to store: {}",
+                                                        e
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        _ => {
+                                            log::info!("Drop message: {:?}", thread);
                                         }
                                     }
                                 }
@@ -700,15 +725,35 @@ impl<C: Store> Manager<C, Registered> {
                             }
                             Ok(None) => debug!("Empty envelope..., message will be skipped!"),
                             Err(e) => {
-                                error!("Error opening envelope: {:?}, message will be skipped!", e);
+                                log::info!(
+                                    "Error opening envelope: {:?}, message will be skipped!",
+                                    e
+                                );
                             }
                         }
                     }
-                    Some(Err(e)) => error!("Error: {}", e),
+                    Some(Err(e)) => log::info!("Error: {}", e),
                     None => return None,
                 }
             }
         }))
+    }
+    /// Returns the last x messages for the given thread.
+    pub fn get_messages( &mut self, thread: &Thread, count: Option<u64>) -> Result<Vec<Content>, Error> {
+        let iter = self.config_store.messages(thread, count);
+        let mut messages: Vec<Content> = Vec::new();
+        for msg in iter? {
+            match msg {
+                Ok(msg) => {
+                    messages.push(msg);
+                }
+                Err(e) => {
+                    log::info!("Error: {}", e);
+                }
+            }
+        }
+        self.config_store.mark_all_as_read(thread)?;
+        Ok(messages)
     }
 
     /// Sends a messages to the provided [ServiceAddress].
@@ -809,35 +854,41 @@ impl<C: Store> Manager<C, Registered> {
 
     /// Get all sessions with unread messages as counter.
     pub fn get_unread_sessions_count(&self) -> Result<Vec<(Thread, usize)>, Error> {
-        let unread_sessions = self.config_store.unread_messages_count_per_thread().unwrap();
+        let unread_sessions = self
+            .config_store
+            .unread_messages_count_per_thread()
+            .unwrap();
         let mut unread_sessions_count = Vec::new();
-        for (thread,  messages_count) in unread_sessions {
+        for (thread, messages_count) in unread_sessions {
             unread_sessions_count.push((thread, messages_count));
         }
         Ok(unread_sessions_count)
     }
 
+    /// reset the unread messages counter for a given thread.
+    pub fn clear_unread_messages(&mut self, thread: &Thread) -> Result<(), Error> {
+        self.config_store.mark_all_as_read(thread)
+    }
+
     pub async fn get_title_for_thread(&self, thread: &Thread) -> Result<String, Error> {
         match thread {
             Thread::Contact(uuid) => {
-                let contact = match self.get_contact_by_id(*uuid){
+                let contact = match self.get_contact_by_id(*uuid) {
                     Ok(contact) => contact,
                     Err(e) => {
-                        log::error!("Error getting contact by id: {}, {:?}", e, uuid);
+                        log::info!("Error getting contact by id: {}, {:?}", e, uuid);
                         None
                     }
                 };
-                Ok(match contact{
+                Ok(match contact {
                     Some(contact) => contact.name,
-                    None => uuid.to_string()
+                    None => uuid.to_string(),
                 })
             }
-            Thread::Group(id) => {
-                match self.config_store.group_by_id(id.to_vec())?{
-                    Some(group) => Ok(String::from_utf8(group.title).unwrap_or("".to_string())),
-                    None => Ok("".to_string())
-                }
-            }
+            Thread::Group(id) => match self.config_store.group_by_id(id.to_vec())? {
+                Some(group) => Ok(String::from_utf8(group.title).unwrap_or("".to_string())),
+                None => Ok("".to_string()),
+            },
         }
     }
 
@@ -847,65 +898,67 @@ impl<C: Store> Manager<C, Registered> {
         for contact in contacts {
             match contact {
                 Ok(contact) => {
-                            let thread = Thread::Contact(contact.address.uuid.unwrap());
-                            let unread_messages_count =
-                                self.config_store.unread_messages_count(&thread)?;
-                                if unread_messages_count == 0 {
-                                    continue;
-                                }
-                            let latest_message = match self.config_store.latest_message(&thread){
-                                Ok(message) => message,
-                                Err(e) => {
-                                    log::error!("Error getting latest message: {}", e);
-                                    None
-                                }
-                            };
-                            let title : Option<String>= match self.get_title_for_thread(&thread).await{
-                                Ok(title) => Some(title),
-                                Err(e) => {
-                                    log::error!("Error getting title: {}", e);
-                                    None
-                                }
-                            };
-                            let conversation = Session {
-                                thread: thread,
-                                last_message: latest_message,
-                                contact: Some(contact),
-                                unread_messages_count: unread_messages_count,
-                                groupv2: None,
-                                title,
-                            };
-                            conversations.push(conversation);
+                    let thread = Thread::Contact(contact.address.uuid.unwrap());
+                    let unread_messages_count = self.config_store.unread_messages_count(&thread)?;
+                    if unread_messages_count == 0 {
+                        continue;
                     }
-                    Err(e) => {
-                        log::error!("Error getting contact: {}", e);
-                    }
+                    let latest_message = match self.config_store.latest_message(&thread) {
+                        Ok(message) => message,
+                        Err(e) => {
+                            log::info!("Error getting latest message: {}", e);
+                            None
+                        }
+                    };
+                    let title: Option<String> = match self.get_title_for_thread(&thread).await {
+                        Ok(title) => Some(title),
+                        Err(e) => {
+                            log::info!("Error getting title: {}", e);
+                            None
+                        }
+                    };
+                    let conversation = Session {
+                        thread: thread,
+                        last_message: latest_message,
+                        contact: Some(contact),
+                        unread_messages_count: unread_messages_count,
+                        groupv2: None,
+                        title,
+                    };
+                    conversations.push(conversation);
                 }
+                Err(e) => {
+                    log::info!("Error getting contact: {}", e);
+                }
+            }
         }
         for group in self.get_groups()? {
             match group {
                 Ok(group) => {
                     let key = group.public_key.to_vec();
-                    let group_id: [u8; 32] = match key.try_into(){
+                    let group_id: [u8; 32] = match key.try_into() {
                         Ok(g) => g,
-                        Err(e) => {println!("{:?}", e); [0; 32]}
+                        Err(e) => {
+                            log::info!("{:?}", e);
+                            [0; 32]
+                        }
                     };
                     let thread = Thread::Group(group_id);
                     let unread_messages_count = self.config_store.unread_messages_count(&thread)?;
                     if unread_messages_count == 0 {
                         continue;
                     }
-                    let latest_message = match self.config_store.latest_message(&thread){
+                    let latest_message = match self.config_store.latest_message(&thread) {
                         Ok(message) => message,
                         Err(e) => {
-                            log::error!("Error getting latest message: {}", e);
+                            log::info!("Error getting latest message: {}", e);
                             None
                         }
                     };
-                    let title : Option<String>= match self.get_title_for_thread(&thread).await{
+                    let title: Option<String> = match self.get_title_for_thread(&thread).await {
                         Ok(title) => Some(title),
                         Err(e) => {
-                            log::error!("Error getting title: {}", e);
+                            log::info!("Error getting title: {}", e);
                             None
                         }
                     };
@@ -920,17 +973,24 @@ impl<C: Store> Manager<C, Registered> {
                     conversations.push(conversation);
                 }
                 Err(e) => {
-                    log::error!("Error getting group: {}", e);
+                    log::info!("Error getting group: {}", e);
                 }
             }
         }
         conversations.sort_unstable_by(|a, b| {
-            let a_timestamp = a.last_message.as_ref().map(|m| m.metadata.timestamp).unwrap_or(0);
-            let b_timestamp = b.last_message.as_ref().map(|m| m.metadata.timestamp).unwrap_or(0);
+            let a_timestamp = a
+                .last_message
+                .as_ref()
+                .map(|m| m.metadata.timestamp)
+                .unwrap_or(0);
+            let b_timestamp = b
+                .last_message
+                .as_ref()
+                .map(|m| m.metadata.timestamp)
+                .unwrap_or(0);
             b_timestamp.cmp(&a_timestamp)
         });
-            
-        
+
         Ok(conversations)
     }
 
@@ -990,12 +1050,12 @@ impl<C: Store> Manager<C, Registered> {
         Ok(group_changes)
     }
 
-    pub fn save_group(&self, group:Group, key:Vec<u8>) -> Result<(), Error> {
+    pub fn save_group(&self, group: Group, key: Vec<u8>) -> Result<(), Error> {
         let proto_group: ProtoGroup = ProtoGroup {
             title: group.title.as_bytes().to_vec(),
             members: Vec::new(),
             avatar: group.avatar,
-            public_key: key ,
+            public_key: key,
             disappearing_messages_timer: Vec::new(),
             access_control: group.access_control,
             version: group.version,
@@ -1005,7 +1065,6 @@ impl<C: Store> Manager<C, Registered> {
             description_bytes: group.description.unwrap_or_default().as_bytes().to_vec(),
             announcements_only: false,
             members_banned: Vec::new(),
-               
         };
         self.config_store.save_group(proto_group)?;
         Ok(())

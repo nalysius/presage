@@ -23,6 +23,8 @@ pub enum Error {
     Base64Error(#[from] base64::DecodeError),
     #[error("wrong slice size: {0}")]
     TryFromSliceError(#[from] std::array::TryFromSliceError),
+    #[error("convert ContentBody to AxolotlMessage failed")]
+    TryFromConentBodyError,
     #[error("phone number parsing error: {0}")]
     PhoneNumberError(#[from] libsignal_service::prelude::phonenumber::ParseError),
     #[error("UUID decoding error: {0}")]
@@ -62,7 +64,9 @@ pub enum Error {
     #[error("I/O error: {0}")]
     FsError(#[from] fs_extra::error::Error),
     #[error("Could not find a contact with the given UUID")]
-    ContactNotFound
+    ContactNotFound,
+    #[error("Invalid group key")]
+    InvalidGroupMasterKey,
 }
 
 impl Error {

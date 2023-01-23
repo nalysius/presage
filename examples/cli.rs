@@ -227,7 +227,7 @@ async fn receive<C: Store + MessageStore>(
     manager: &mut Manager<C, Registered>,
 ) -> anyhow::Result<()> {
     let attachments_tmp_dir = Builder::new().prefix("presage-attachments").tempdir()?;
-    println!(
+    log::info!(
         "attachments will be stored in {}",
         attachments_tmp_dir.path().display()
     );
@@ -249,25 +249,25 @@ async fn receive<C: Store + MessageStore>(
                     }),
                 ..
             }) => {
-                println!("Received message from {:?}", metadata.sender);
+                log::info!("Received message from {:?}", metadata.sender);
                 if let Some(quote) = &message.quote {
-                    println!(
+                    log::info!(
                         "Quote from {:?}: > {:?} / {}",
                         metadata.sender,
                         quote,
                         message.body()
                     );
                 } else if let Some(reaction) = message.reaction {
-                    println!(
+                    log::info!(
                         "Reaction to message sent at {:?}: {:?}",
                         reaction.target_sent_timestamp, reaction.emoji
                     );
                 } else {
                     let self_is_sender = metadata.sender.uuid == Some(manager.uuid());
                     if self_is_sender {
-                        println!("Message sent to {:?}: {:?}", metadata.sender, message);
+                        log::info!("Message sent to {:?}: {:?}", metadata.sender, message);
                     } else {
-                        println!("Message from {:?}: {:?}", metadata.sender, message);
+                        log::info!("Message from {:?}: {:?}", metadata.sender, message);
                     }
                     let body = message.body().to_string();
                     let mut session_name: String = "Unknown contact".to_string();
@@ -279,15 +279,15 @@ async fn receive<C: Store + MessageStore>(
                         let group = manager.get_group_v2(master_key).await?;
                         let group_changes = manager.decrypt_group_context(group_v2)?;
                         session_name = group.title.to_string();
-                        println!("Group v2: {:?}", session_name);
-                        println!("Group change: {:?}", group_changes);
-                        println!("Group master key: {:?}", hex::encode(&master_key_bytes));
+                        log::info!("Group v2: {:?}", session_name);
+                        log::info!("Group change: {:?}", group_changes);
+                        log::info!("Group master key: {:?}", hex::encode(&master_key_bytes));
                         manager.save_group(group, master_key_bytes.to_vec())?;
                     } else if !self_is_sender {
                         //get the contact name
                         match metadata.sender.uuid {
                             Some(uuid) => {
-                                println!("uuid: {:?}", uuid);
+                                log::info!("uuid: {:?}", uuid);
                                 for contact in manager
                                     .get_contacts()?
                                     .filter_map(Result::ok)
@@ -314,7 +314,7 @@ async fn receive<C: Store + MessageStore>(
                                     }
                                 }
                             }
-                            None => println!("No uuid found"),
+                            None => log::error!("No uuid found"),
                         };
                     }
                     // only show notification if the message is not from us
@@ -351,16 +351,16 @@ async fn receive<C: Store + MessageStore>(
                 }
             }
             ContentBody::SynchronizeMessage(m) => {
-                println!("Unhandled sync message: {:?}", m);
+                log::info!("Unhandled sync message: {:?}", m);
             }
             ContentBody::TypingMessage(_) => {
-                println!("{:?} is typing", metadata.sender);
+                log::info!("{:?} is typing", metadata.sender);
             }
             ContentBody::CallMessage(_) => {
-                println!("{:?} is calling!", metadata.sender);
+                log::info!("{:?} is calling!", metadata.sender);
             }
             ContentBody::ReceiptMessage(_) => {
-                println!("Got read receipt from: {:?}", metadata.sender);
+                log::info!("Got read receipt from: {:?}", metadata.sender);
             }
         }
     }
@@ -422,16 +422,16 @@ async fn run<C: Store + MessageStore>(subcommand: Cmd, config_store: C) -> anyho
             match manager {
                 (Ok(manager), _) => {
                     let uuid = manager.whoami().await.unwrap().uuid;
-                    println!("{:?}", uuid);
+                    log::info!("{:?}", uuid);
                 }
                 (Err(err), _) => {
-                    println!("{:?}", err);
+                    log::error!("{:?}", err);
                 }
             }
         }
         Cmd::Receive => {
             let mut manager = Manager::load_registered(config_store)?;
-            println!("Listening for messages...");
+            log::info!("Listening for messages...");
             receive(&mut manager).await?;
         }
         Cmd::Send { uuid, message } => {
@@ -491,7 +491,7 @@ async fn run<C: Store + MessageStore>(subcommand: Cmd, config_store: C) -> anyho
                     profile_key = Some(ProfileKey(profilek));
                 }
             } else {
-                println!(
+                log::info!(
                     "Retrieving profile for: {:?} with
                 profile_key",
                     uuid
@@ -507,7 +507,7 @@ async fn run<C: Store + MessageStore>(subcommand: Cmd, config_store: C) -> anyho
                         .await?
                 }
             };
-            println!("{profile:#?}");
+            log::info!("{profile:#?}");
         }
         Cmd::UpdateProfile => unimplemented!(),
         Cmd::GetUserStatus => unimplemented!(),
@@ -518,23 +518,23 @@ async fn run<C: Store + MessageStore>(subcommand: Cmd, config_store: C) -> anyho
             let manager = Manager::load_registered(config_store)?;
             let mut groups = manager.get_groups()?.peekable();
             if groups.peek().is_some() {
-                println!("Groups: ");
+                log::info!("Groups: ");
                 for group in groups {
                     match group {
                         Ok(group) => {
                             let title = String::from_utf8(group.title.clone())?;
                             let key = base64::encode(group.public_key.clone());
-                            println!("{:?} {:?}",key,  title);
+                            log::info!("{:?} {:?}",key,  title);
                         }
                         Err(e) => {
-                            println!("Error: {:?}", e);
+                            log::error!("Error: {:?}", e);
                             continue;
                         }
                     };
                 }
                  
             } else {
-                println!("No groups found");
+                log::error!("No groups found");
             }
         },
         Cmd::UpdateContactsFromProfile => {
@@ -564,10 +564,10 @@ async fn run<C: Store + MessageStore>(subcommand: Cmd, config_store: C) -> anyho
                     match manager.save_contact(contact) {
                         Ok(_) => {}
                         Err(e) => {
-                            println!("Error saving contact: {:?}", e);
+                            log::error!("Error saving contact: {:?}", e);
                         }
                     };
-                    println!("Updating contact: {:?}", name);
+                    log::info!("Updating contact: {:?}", name);
                 }
             }
         }
@@ -585,7 +585,7 @@ async fn run<C: Store + MessageStore>(subcommand: Cmd, config_store: C) -> anyho
                     ..
                 } = contact?
                 {
-                    println!("{} / {} / {}", uuid, name, phonenumber);
+                    log::info!("{} / {} / {}", uuid, name, phonenumber);
                 }
             }
         }
@@ -595,8 +595,8 @@ async fn run<C: Store + MessageStore>(subcommand: Cmd, config_store: C) -> anyho
                 let (conversation, unread_messages) = conversation;
                 if unread_messages > 0 {
                     match conversation{
-                        Thread::Contact(contact) => println!("{:?} unread: {:?}", contact, unread_messages),
-                        Thread::Group(group) => println!("{:?} unread: {:?}", base64::encode(group), unread_messages),
+                        Thread::Contact(contact) => log::info!("{:?} unread: {:?}", contact, unread_messages),
+                        Thread::Group(group) => log::info!("{:?} unread: {:?}", base64::encode(group), unread_messages),
                     }
                 }
             }
@@ -613,7 +613,7 @@ async fn run<C: Store + MessageStore>(subcommand: Cmd, config_store: C) -> anyho
                     Thread::Contact(contact) => contact.to_string(),
                     Thread::Group(group) => base64::encode(group).to_string(),
                 };
-                // println!("{:?}", conversation.last_message.unwrap().body);
+                // log::info!("{:?}", conversation.last_message.unwrap().body);
                 let message_content: String = match conversation.last_message.as_ref(){
                     Some(message) => match message.body.clone(){
                         ContentBody::DataMessage(msg ) => msg.body.unwrap_or("".to_string()),
@@ -626,12 +626,12 @@ async fn run<C: Store + MessageStore>(subcommand: Cmd, config_store: C) -> anyho
                     Some(message )=> message.metadata.timestamp.to_string(),
                     None => "".to_string(),
                 };
-                println!("{:?}-{:?} unread: {:?},  {:?}: {:?}", id,conversation.title.unwrap_or("".to_string()), conversation.unread_messages_count, timestamp,  message_content);
+                log::info!("{:?}-{:?} unread: {:?},  {:?}: {:?}", id,conversation.title.unwrap_or("".to_string()), conversation.unread_messages_count, timestamp,  message_content);
             }
         }
         Cmd::Whoami => {
             let manager = Manager::load_registered(config_store)?;
-            println!("{:?}", &manager.whoami().await?);
+            log::info!("{:?}", &manager.whoami().await?);
         }
         Cmd::FindContact { uuid, ref name } => {
             let manager = Manager::load_registered(config_store)?;
@@ -641,7 +641,7 @@ async fn run<C: Store + MessageStore>(subcommand: Cmd, config_store: C) -> anyho
                 .filter(|c| c.address.uuid == uuid)
                 .filter(|c| name.as_ref().map_or(true, |n| c.name.contains(n)))
             {
-                println!("{contact:#?}");
+                log::info!("{contact:#?}");
             }
         }
         #[cfg(feature = "quirks")]
@@ -660,17 +660,17 @@ async fn run<C: Store + MessageStore>(subcommand: Cmd, config_store: C) -> anyho
             };
             let iter = config_store.messages(&thread, None)?;
             for msg in iter.filter_map(Result::ok) {
-                println!("{}: {:?}", msg.metadata.sender.identifier(), msg);
+                log::info!("{}: {:?}", msg.metadata.sender.identifier(), msg);
             }
         }
         Cmd::GetGroup { group_master_key } => {
             let( master_key, key ) = group_master_key;
             let manager = Manager::load_registered(config_store)?;
             let group = manager.get_group_v2(master_key).await?;
-            println!("{:#?}", DebugGroup(&group));
+            log::info!("{:#?}", DebugGroup(&group));
             for member in &group.members {
                 let profile_key = base64::encode(&member.profile_key.bytes);
-                println!("{member:#?} => profile_key = {profile_key}");
+                log::info!("{member:#?} => profile_key = {profile_key}");
             }
             manager.save_group(group, key.as_bytes().to_vec())?;
         }

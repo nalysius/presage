@@ -82,6 +82,32 @@ pub enum Thread {
     Group([u8; 32]),
 }
 
+impl ToString for Thread {
+    fn to_string(&self) -> String {
+        match self {
+            Self::Contact(uuid) => uuid.to_string(),
+            Self::Group(key) => hex::encode(key),
+        }
+    }
+}
+impl TryFrom<&String> for Thread {
+    type Error = Error;
+
+    fn try_from(s: &String) -> Result<Self, Error> {
+        match Uuid::parse_str(s) {
+            Ok(uuid) => Ok(Self::Contact(uuid)),
+            Err(_) => {
+                let key = hex::decode(s).map_err(|_| Error::InvalidGroupMasterKey)?;
+                if key.len() != 32 {
+                    return Err(Error::InvalidGroupMasterKey);
+                }
+                let mut key_bytes = [0u8; 32];
+                key_bytes.copy_from_slice(&key);
+                Ok(Self::Group(key_bytes))
+            }
+        }
+    }
+}
 impl TryFrom<&Content> for Thread {
     type Error = Error;
 
