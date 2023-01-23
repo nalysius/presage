@@ -3,7 +3,7 @@ use std::{
     sync::Arc,
     time::{Duration, UNIX_EPOCH},
 };
-use libsignal_service::proto::Group as ProtoGroup;
+use libsignal_service::{proto::Group as ProtoGroup, profile_name::ProfileName};
 
 use futures::{channel::mpsc, channel::oneshot, future, pin_mut, AsyncReadExt, Stream, StreamExt};
 use log::{debug, error, info, trace};
@@ -664,7 +664,40 @@ impl<C: Store> Manager<C, Registered> {
     pub fn save_contact(&mut self, contact: Contact) -> Result<(), Error> {
         self.config_store.save_contact(contact)
     }
-
+    pub async fn request_contacts_update_from_profile(&mut self) -> Result<(), Error> {
+        for contact in self.get_contacts()? {
+            let mut contact = contact?;
+            if contact.name.is_empty() {
+                let k = contact.profile_key.to_vec();
+                let profile_key: [u8; 32] = match k.try_into() {
+                    Ok(key) => key,
+                    Err(_) => continue,
+                };
+                let profile = self
+                    .retrieve_profile_by_uuid(
+                        contact.address.uuid.unwrap_or(Uuid::nil()),
+                        profile_key,
+                    )
+                    .await?;
+                let name = profile.name.unwrap_or(ProfileName {
+                    given_name: match contact.address.phonenumber {
+                        Some(_) => "".to_string(),
+                        None => continue,
+                    },
+                    family_name: None,
+                });
+                contact.name = name.to_string();
+                match self.save_contact(contact) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        println!("Error saving contact: {:?}", e);
+                    }
+                };
+                println!("Updating contact: {:?}", name);
+            }
+        }
+        Ok(())
+    }
     async fn receive_messages_encrypted(
         &mut self,
     ) -> Result<impl Stream<Item = Result<Envelope, ServiceError>>, Error> {
@@ -706,32 +739,6 @@ impl<C: Store> Manager<C, Registered> {
                 match state.encrypted_messages.next().await {
                     Some(Ok(envelope)) => {
                         match state.service_cipher.open_envelope(envelope).await {
-                            // contacts synchronization sent from the primary device (happens after linking, or on demand)
-                            Ok(Some(Content {
-                                metadata: Metadata { .. },
-                                body:
-                                    ContentBody::SynchronizeMessage(SyncMessage {
-                                        contacts: Some(contacts),
-                                        ..
-                                    }),
-                                ..
-                            })) => {
-                                let mut message_receiver =
-                                    MessageReceiver::new(state.push_service.clone());
-                                match message_receiver.retrieve_contacts(&contacts).await {
-                                    Ok(contacts_iter) => {
-                                        let _ = state.config_store.clear_contacts();
-                                        if let Err(e) = state
-                                            .config_store
-                                            .save_contacts(contacts_iter.filter_map(Result::ok))
-                                        {
-                                            log::info!("failed to save contacts: {}", e)
-                                        }
-                                        info!("saved contacts");
-                                    }
-                                    Err(e) => log::info!("failed to retrieve contacts: {}", e),
-                                }
-                            }
                             Ok(Some(content)) => {
                                 // contacts synchronization sent from the primary device (happens after linking, or on demand)
                                 if let ContentBody::SynchronizeMessage(SyncMessage {
@@ -747,56 +754,11 @@ impl<C: Store> Manager<C, Registered> {
                                 }
 
                                 if let Ok(thread) = Thread::try_from(&content) {
-                                    match content.clone().body {
-                                        ContentBody::DataMessage(_) => {
-                                            match state
-                                                .config_store
-                                                .save_message(&thread, content.clone())
-                                            {
-                                                Ok(id) => {
-                                                    log::info!("Saved message with id {}", id);
-                                                    // add to unread messages
-                                                    if let Err(e) = state
-                                                        .config_store
-                                                        .add_unread_message(&thread, id)
-                                                    {
-                                                        log::info!(
-                                                        "Error adding unread message to store: {}",
-                                                        e
-                                                    );
-                                                    }
-                                                }
-                                                Err(e) => {
-                                                    log::info!(
-                                                        "Error saving message to store: {}",
-                                                        e
-                                                    );
-                                                }
-                                            }
-                                        }
-                                        ContentBody::SynchronizeMessage(_) => {
-                                            match state
-                                                .config_store
-                                                .save_message(&thread, content.clone())
-                                            {
-                                                Ok(id) => {
-                                                    log::info!(
-                                                        "Saved message with id {} {:?}",
-                                                        id,
-                                                        state.config_store.my_uuid()
-                                                    );
-                                                }
-                                                Err(e) => {
-                                                    log::info!(
-                                                        "Error saving message to store: {}",
-                                                        e
-                                                    );
-                                                }
-                                            }
-                                        }
-                                        _ => {
-                                            log::info!("Drop message: {:?}", thread);
-                                        }
+                                    // TODO: handle reactions here, we should update the original message?
+                                    if let Err(e) =
+                                        state.config_store.save_message(&thread, content.clone())
+                                    {
+                                        log::error!("Error saving message to store: {}", e);
                                     }
                                 }
 
@@ -804,14 +766,11 @@ impl<C: Store> Manager<C, Registered> {
                             }
                             Ok(None) => debug!("Empty envelope..., message will be skipped!"),
                             Err(e) => {
-                                log::info!(
-                                    "Error opening envelope: {:?}, message will be skipped!",
-                                    e
-                                );
+                                error!("Error opening envelope: {:?}, message will be skipped!", e);
                             }
                         }
                     }
-                    Some(Err(e)) => log::info!("Error: {}", e),
+                    Some(Err(e)) => error!("Error: {}", e),
                     None => return None,
                 }
             }
