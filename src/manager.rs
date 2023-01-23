@@ -698,6 +698,38 @@ impl<C: Store> Manager<C, Registered> {
         }
         Ok(())
     }
+
+    // save thread to store if it doesn't exist
+    pub fn save_thread(&mut self, thread: Thread, profile_key: Option<Vec<u8>>) -> Result<(), Error> {
+        match thread {
+            Thread::Group(_) => {
+                //todo!()
+                Ok(())
+ 
+            },
+            Thread::Contact(contact) => {
+                let mut contact_from_store = self.config_store.contact_by_id(contact);
+                if contact_from_store?.is_none() {
+                    let new_contact = Contact{
+                        address: ServiceAddress { uuid: Some(contact), phonenumber: None, relay: None },
+                        name: "".to_string(),
+                        color: None,
+                        verified: libsignal_service::proto::Verified { destination_e164: None, destination_uuid: None, identity_key: None, state: None, null_message: None },
+                        profile_key: profile_key.unwrap_or(Vec::new()),
+                        blocked: false,
+                        expire_timer: 0,
+                        inbox_position: 0,
+                        archived: false,
+                        avatar: None,
+                    };
+                    self.config_store.save_contact(new_contact);
+
+                }
+                Ok(())
+            }
+        }
+    }
+
     async fn receive_messages_encrypted(
         &mut self,
     ) -> Result<impl Stream<Item = Result<Envelope, ServiceError>>, Error> {
@@ -760,7 +792,51 @@ impl<C: Store> Manager<C, Registered> {
                                     {
                                         log::error!("Error saving message to store: {}", e);
                                     }
+                                    log::info!("Received message: {:?} , {:?}", content, thread);
+                                    // create thread if it doesn't exist
+                                    match thread {
+                                        Thread::Group(_) => {
+                                            //todo!()
+                             
+                                        },
+                                        Thread::Contact(contact) => {
+                                            let contact_from_store = state.config_store.contact_by_id(contact);
+                                            log::info!("Contact from store: {:?}", contact_from_store);
+                                            let profile_key = match &content.body {
+                                                ContentBody::DataMessage(message) => message.profile_key.clone(),
+                                                _ => None,
+                                            };
+                                            let service_adress = content.metadata.sender.clone();
+
+                                            match  contact_from_store{
+                                                Ok(Some(_)) => {
+                                                    log::info!("Contact already exists: {}", contact);
+                                                },
+                                                _ => {
+                                                log::info!("Creating new contact: {}", contact);
+                                                let new_contact = Contact{
+                                                    address: service_adress,
+                                                    name: "".to_string(),
+                                                    color: None,
+                                                    verified: libsignal_service::proto::Verified { destination_e164: None, destination_uuid: None, identity_key: None, state: None, null_message: None },
+                                                    profile_key: profile_key.unwrap_or(Vec::new()),
+                                                    blocked: false,
+                                                    expire_timer: 0,
+                                                    inbox_position: 0,
+                                                    archived: false,
+                                                    avatar: None,
+                                                };
+                                                match state.config_store.save_contact(new_contact){
+                                                    Ok(_) => log::info!("Contact saved"),
+                                                    Err(e) => log::error!("Error saving contact: {}", e),
+                                                }
+                            
+                                            }
+                                        }
+                                        }
+                                    }
                                 }
+
 
                                 return Some((content, state));
                             }
@@ -931,16 +1007,25 @@ impl<C: Store> Manager<C, Registered> {
     }
 
     pub async fn load_conversations(&self) -> Result<Vec<Session>, Error> {
-        let contacts = self.get_contacts()?;
+        let contacts = match self.get_contacts(){
+            Ok(contacts) => contacts,
+            Err(e) => {
+                log::info!("Error getting contacts: {}", e);
+                return Ok(Vec::new());
+            }
+        };
         let mut conversations = Vec::new();
         for contact in contacts {
             match contact {
                 Ok(contact) => {
                     let thread = Thread::Contact(contact.address.uuid.unwrap());
-                    let unread_messages_count = self.config_store.unread_messages_count(&thread)?;
-                    if unread_messages_count == 0 {
-                        continue;
-                    }
+                    let unread_messages_count = match self.config_store.unread_messages_count(&thread){
+                        Ok(count) => count,
+                        Err(e) => {
+                            log::info!("Error getting unread messages count: {}", e);
+                            0
+                        }
+                    };
                     let latest_message = match self.config_store.latest_message(&thread) {
                         Ok(message) => message,
                         Err(e) => {
@@ -948,6 +1033,7 @@ impl<C: Store> Manager<C, Registered> {
                             None
                         }
                     };
+
                     let title: Option<String> = match self.get_title_for_thread(&thread).await {
                         Ok(title) => Some(title),
                         Err(e) => {
@@ -955,6 +1041,8 @@ impl<C: Store> Manager<C, Registered> {
                             None
                         }
                     };
+                    log::debug!("contact3: {:?}", contact);
+
                     let conversation = Session {
                         thread: thread,
                         last_message: latest_message,
@@ -963,13 +1051,17 @@ impl<C: Store> Manager<C, Registered> {
                         groupv2: None,
                         title,
                     };
+                    log::debug!("contact4: {:?}", conversation);
+
                     conversations.push(conversation);
                 }
                 Err(e) => {
-                    log::info!("Error getting contact: {}", e);
+                    log::error!("Error getting contact: {}", e);
                 }
             }
         }
+        log::debug!("contact5: {:?}", conversations);
+
         for group in self.get_groups()? {
             match group {
                 Ok(group) => {
@@ -982,7 +1074,13 @@ impl<C: Store> Manager<C, Registered> {
                         }
                     };
                     let thread = Thread::Group(group_id);
-                    let unread_messages_count = self.config_store.unread_messages_count(&thread)?;
+                    let unread_messages_count = match self.config_store.unread_messages_count(&thread){
+                        Ok(count) => count,
+                        Err(e) => {
+                            log::info!("Error getting unread messages for group count: {}", e);
+                            0
+                        }
+                    };
                     if unread_messages_count == 0 {
                         continue;
                     }
