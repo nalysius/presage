@@ -792,7 +792,6 @@ impl<C: Store> Manager<C, Registered> {
                                     {
                                         log::error!("Error saving message to store: {}", e);
                                     }
-                                    log::info!("Received message: {:?} , {:?}", content, thread);
                                     // create thread if it doesn't exist
                                     match thread {
                                         Thread::Group(_) => {
@@ -801,7 +800,7 @@ impl<C: Store> Manager<C, Registered> {
                                         },
                                         Thread::Contact(contact) => {
                                             let contact_from_store = state.config_store.contact_by_id(contact);
-                                            log::info!("Contact from store: {:?}", contact_from_store);
+                                            log::debug!("Contact from store: {:?}", contact_from_store);
                                             let profile_key = match &content.body {
                                                 ContentBody::DataMessage(message) => message.profile_key.clone(),
                                                 _ => None,
@@ -810,7 +809,7 @@ impl<C: Store> Manager<C, Registered> {
 
                                             match  contact_from_store{
                                                 Ok(Some(_)) => {
-                                                    log::info!("Contact already exists: {}", contact);
+                                                    log::debug!("Contact already exists: {}", contact);
                                                 },
                                                 _ => {
                                                 log::info!("Creating new contact: {}", contact);
@@ -1041,7 +1040,6 @@ impl<C: Store> Manager<C, Registered> {
                             None
                         }
                     };
-                    log::debug!("contact3: {:?}", contact);
 
                     let conversation = Session {
                         thread: thread,
@@ -1051,7 +1049,6 @@ impl<C: Store> Manager<C, Registered> {
                         groupv2: None,
                         title,
                     };
-                    log::debug!("contact4: {:?}", conversation);
 
                     conversations.push(conversation);
                 }
