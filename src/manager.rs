@@ -787,6 +787,23 @@ impl<C: Store> Manager<C, Registered> {
 
                                 if let Ok(thread) = Thread::try_from(&content) {
                                     // TODO: handle reactions here, we should update the original message?
+                                    match &content.body {
+                                        ContentBody::ReceiptMessage(_) => {
+                                            // todo!()
+                                            continue;
+                                        }
+                                        ContentBody::TypingMessage(_) => {
+                                            // todo!()
+                                            continue;
+                                        }
+                                        ContentBody::SynchronizeMessage(message) => {
+                                            if message.sent.is_none() {
+                                                continue;
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                    
                                     if let Err(e) =
                                         state.config_store.save_message(&thread, content.clone())
                                     {
@@ -1057,7 +1074,6 @@ impl<C: Store> Manager<C, Registered> {
                 }
             }
         }
-        log::debug!("contact5: {:?}", conversations);
 
         for group in self.get_groups()? {
             match group {
