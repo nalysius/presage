@@ -820,8 +820,20 @@ impl<C: Store> Manager<C, Registered> {
                                             }
                                         }
                                         ContentBody::DataMessage(message) => {
-                                            // ignore empty messages
-                                            if message.body == Some("".to_string()) {
+                                            // After sending a message, an "empty" message
+                                            // is received with only flags set to 4.
+                                            // Ignore empty messages
+                                            if message.body.is_none()
+                                                && message.attachments.is_empty()
+                                                && message.group.is_none()
+                                                && message.group_v2.is_none()
+                                                && message.quote.is_none()
+                                                && message.reaction.is_none()
+                                                && message.sticker.is_none()
+                                                && message.delete.is_none()
+                                                && message.group_call_update.is_none()
+                                                || message.body == Some("".to_string())
+                                            {
                                                 continue;
                                             }
                                         }
